@@ -343,7 +343,7 @@ class IpaG2p(BaseG2p):
     def is_unique_in_phoneme_dict(self, word: str) -> bool:
         return len(self.phoneme_dict[word]) == 1
 
-    def parse_one_word(self, word: str) -> Tuple[List[str], bool]:
+    def parse_one_word(self, word: str, sentence_tag:str = None) -> Tuple[List[str], bool]:
         """Returns parsed `word` and `status` (bool: False if word wasn't handled, True otherwise).
         """
         word = set_grapheme_case(word, case=self.grapheme_case)
@@ -362,7 +362,8 @@ class IpaG2p(BaseG2p):
 
         # special cases for en-US when transliterating a word into a list of phonemes.
         # TODO @xueyang: add special cases for any other languages upon new findings.
-        if self.locale == "en-US":
+        #if self.locale == "en-US":
+        if sentence_tag == "<en-US>" or self.locale == "en-US":
             # `'s` suffix (with apostrophe) - not in phoneme dict
             if len(word) > 2 and (word.endswith("'s") or word.endswith("'S")):
                 word_found = None
@@ -405,7 +406,7 @@ class IpaG2p(BaseG2p):
                     else:
                         return self.phoneme_dict[word_found][0] + ["z"], True
 
-        if self.locale == "fr-FR":
+        if self.locale == "fr-FR" or sentence_tag == "<fr-FR>":
             # contracted prefix (with apostrophe) - not in phoneme dict
             contractions_g = ['l', 'c', 'd', 'j', 'm', 'n', 'qu', 's', 't', 'puisqu', 'lorsqu', 'jusqu']
             contractions_p = ['l', 's', 'd', 'ʒ', 'm', 'n', 'k', 's', 't', 'pyisk', 'loʁsk', 'ʒysk']
@@ -450,6 +451,20 @@ class IpaG2p(BaseG2p):
             return self._prepend_prefix_for_one_word(word), False
 
     def __call__(self, text: str) -> List[str]:
+         # check for sentence tags, assign sentence_tag variable for current text
+        sentence_tag = ""
+        if "<en-US>" in text:
+            sentence_tag = "<en-US>"
+        elif "<es-ES>" in text:
+            sentence_tag = "<es-ES>"
+        elif "<fr-FR>" in text:
+            sentence_tag = "<fr-FR>"
+        elif "<de-DE>" in text:
+            sentence_tag = "<de-DE>"
+        
+        # there is only one occurence of the sentence tag per line of training data
+        text = text.replace(sentence_tag, "")
+        print(text)
         text = normalize_unicode_text(text)
 
         if self.heteronym_model is not None:
@@ -459,6 +474,7 @@ class IpaG2p(BaseG2p):
                 logging.warning(f"Heteronym model failed {e}, skipping")
 
         words_list_of_tuple = self.word_tokenize_func(text)
+        print("word_list_of_tuple", words_list_of_tuple)
 
         prons = []
         for words, without_changes in words_list_of_tuple:
@@ -471,7 +487,7 @@ class IpaG2p(BaseG2p):
                 ), f"{words} should only have a single item when `without_changes` is False, but found {len(words)}."
 
                 word = words[0]
-                pron, is_handled = self.parse_one_word(word)
+                pron, is_handled = self.parse_one_word(word, sentence_tag)
 
                 # If `is_handled` is False, then the only possible case is that the word is an OOV. The OOV may have a
                 # hyphen so that it doesn't show up in the g2p dictionary. We need split it into sub-words by a hyphen,
@@ -489,3 +505,4 @@ class IpaG2p(BaseG2p):
                 prons.extend(pron)
 
         return prons
+
