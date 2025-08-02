@@ -37,7 +37,7 @@ model:
 
 
   # Speaking rate parameters
-  num_speaking_rate_bins: 21
+  num_speaking_rate_bins: 10
   min_speaking_rate: -1.875
   max_speaking_rate: -1.125
   speaking_rate_dropout: 0.1
