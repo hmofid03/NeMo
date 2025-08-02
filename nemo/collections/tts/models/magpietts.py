@@ -42,6 +42,40 @@ from nemo.core.classes import ModelPT
 from nemo.core.classes.common import PretrainedModelInfo
 from nemo.utils import logging
 
+class SpeakingRatePredictor(nn.Module):
+    def __init__(self, context_dim, num_speaking_rate_bins):
+        super(SpeakingRatePredictor, self).__init__()
+        self.hidden_layer = nn.Linear(context_dim, context_dim)
+        self.speaking_rate_layer = nn.Linear(context_dim, num_speaking_rate_bins)
+
+    def forward(self, context_emb):
+        out = self.hidden_layer(context_emb)
+        speaking_rate_logits = self.speaking_rate_layer(out)
+        speaking_rate_indices_pred = speaking_rate_logits.argmax(dim=1)
+        return speaking_rate_indices_pred, speaking_rate_logits
+
+class SpeakingRateQuantizer(nn.Module):
+    def __init__(self, num_bins, min_value, max_value):
+        super().__init__()
+        self.num_bins = num_bins
+        self.max_bin = num_bins - 1
+        self.shift = (min_value + max_value) / 2
+        self.scale = max_value - self.shift
+
+    def forward(self, inputs):
+        scaled = (inputs - self.shift) / self.scale
+        scaled = torch.clamp(scaled, min=-1.0, max=1.0)
+        shifted = (scaled + 1.0) / 2.0
+        indices = torch.round(shifted * self.max_bin)
+        indices = torch.clamp(indices, min=0, max=self.max_bin).int()
+        codes = self.get_codes(indices)
+        return codes, indices
+
+    def get_codes(self, indices):
+        codes = indices.float() / self.max_bin
+        codes = 2.0 * codes - 1.0
+        return codes
+
 def worker_init_fn(worker_id):
     # For mp.set_start_method("spawn", force=True)
     # The dataset class should be picklable, so we initialize non-picklable objects here
@@ -282,6 +316,38 @@ class MagpieTTSModel(ModelPT):
         self.aligner_encoder_train_steps = self.cfg.get('aligner_encoder_train_steps', float('inf'))
         self.dec_random_input_max = self.cfg.get('dec_random_input_max', self.num_all_tokens_per_codebook)
 
+        # Initialize speaking rate modules
+        self.sr_predictor = SpeakingRatePredictor(cfg.encoder.d_model, cfg.num_speaking_rate_bins)
+        self.sr_quantizer = SpeakingRateQuantizer(cfg.num_speaking_rate_bins, cfg.min_speaking_rate, cfg.max_speaking_rate)
+
+        # Add conditioning layer and dropout for speaking rate
+        self.sr_cond_layer = nn.Linear(1, cfg.encoder.d_model)
+        self.sr_dropout = nn.Dropout(cfg.speaking_rate_dropout)
+
+    def get_speaking_rate(self, text_lens, durs):
+        sr_text_len = torch.clamp_min(text_lens - 2, min=1)
+        text_mask = get_mask_from_lengths(text_lens)
+        max_text_len = text_mask.shape[1]
+        indices = torch.arange(max_text_len, device=durs.device) + 1
+        dur_mask = torch.where(
+            rearrange(indices, 'T -> 1 T') == rearrange(text_lens, 'B -> B 1'),
+            torch.zeros_like(text_mask),
+            text_mask
+        )
+        sr_durs = torch.clamp(durs.float(), min=self.cfg.min_token_duration, max=self.cfg.max_token_duration)
+        sr_durs = sr_durs * dur_mask
+        sr_durs = sr_durs[:, 1:]
+        sr_audio_lens = sr_durs.sum(dim=1)
+        fps = (-1.0) * sr_audio_lens / sr_text_len.float()
+        speaking_rate, speaking_rate_indices = self.sr_quantizer(inputs=fps)
+        return speaking_rate, speaking_rate_indices
+
+    def _condition_on_speaking_rate(self, inputs, speaking_rate, mask):
+        sr_res = self.sr_cond_layer(speaking_rate.unsqueeze(1)).detach()
+        sr_res = self.sr_dropout(sr_res)
+        out = inputs + sr_res
+        out = out * mask.unsqueeze(-1)
+        return out
 
     def state_dict(self, destination=None, prefix='', keep_vars=False):
         """
@@ -1217,15 +1283,35 @@ class MagpieTTSModel(ModelPT):
                 )
                 if (self.global_step > self.binarize_prior_after_step) and context_tensors['prior_used']:
                     attn_prior = self.replace_beta_binomial_prior_with_binarized(attn_prior, aligner_attn_hard)
+       
+        # Speaking rate conditioning
+        speaking_rate, speaking_rate_indices = self.get_speaking_rate(text_lens=context_tensors['text_lens'], durs=durs)
+        text_enc_sr_cond = self._condition_on_speaking_rate(context_tensors['text_encoder_out'], speaking_rate, text_mask)
+
+        # Original code of the forward pass with no speaking rate
+        # logits, attn_info, dec_out = self.forward(
+        #     dec_input_embedded=dec_input_embedded,
+        #     dec_input_mask=dec_input_mask,
+        #     cond=cond,
+        #     cond_mask=cond_mask,
+        #     attn_prior=attn_prior,
+        #     multi_encoder_mapping=context_tensors['multi_encoder_mapping'],
+        # )
 
         logits, attn_info, dec_out = self.forward(
             dec_input_embedded=dec_input_embedded,
             dec_input_mask=dec_input_mask,
-            cond=cond,
+            cond=text_enc_sr_cond,
             cond_mask=cond_mask,
             attn_prior=attn_prior,
             multi_encoder_mapping=context_tensors['multi_encoder_mapping'],
         )
+
+        # Calculate speaking rate loss
+        speaking_rate_indices_pred, speaking_rate_logits = self.sr_predictor(context_tensors['text_encoder_out'])
+        speaking_rate_loss = F.cross_entropy(speaking_rate_logits, speaking_rate_indices)
+
+
         # logits: (B, T', num_codebooks * num_tokens_per_codebook)
         # dec_out: (B, T', E)
         dec_context_size = context_tensors['dec_context_size']
@@ -1242,6 +1328,9 @@ class MagpieTTSModel(ModelPT):
             loss = self.codebook_loss_scale * codebook_loss + alignment_loss
         else:
             loss = self.codebook_loss_scale * codebook_loss
+        
+        # Add speaking rate loss to total loss
+        loss += speaking_rate_loss
 
         local_transformer_loss = None
         local_transformer_logits = None
@@ -1272,6 +1361,7 @@ class MagpieTTSModel(ModelPT):
             'loss_mask': loss_mask,
             'alignment_loss': alignment_loss,
             'aligner_encoder_loss': aligner_encoder_loss,
+            'speaking_rate_loss': speaking_rate_loss,  # Include speaking rate loss in return
             'audio_codes_target': audio_codes_target,
             'audio_codes_lens_target': audio_codes_lens_target,
             'text': context_tensors['text'],
@@ -1288,6 +1378,11 @@ class MagpieTTSModel(ModelPT):
         loss = batch_output['loss']
         codebook_loss = batch_output['codebook_loss']
         self.log('train/codebook_loss', codebook_loss, prog_bar=True, sync_dist=True)
+        # Get speaking rate loss
+        speaking_rate_loss = batch_output['speaking_rate_loss'] 
+        # Log speaking rate loss
+        self.log('train/speaking_rate_loss', speaking_rate_loss, prog_bar=True, sync_dist=True)  
+
         if self.cfg_unconditional_prob == 0.0:
             # Only log alignment loss when not using cfg to avoid sync issues when
             # alignment loss is None on some ranks
@@ -1338,6 +1433,10 @@ class MagpieTTSModel(ModelPT):
         codebook_loss = batch_output['codebook_loss']
         alignment_loss = batch_output['alignment_loss']
         aligner_encoder_loss = batch_output['aligner_encoder_loss']
+        
+        # Get speaking rate loss
+        speaking_rate_loss = batch_output['speaking_rate_loss']  
+
         logits = batch_output['logits']
         audio_codes_target = batch_output['audio_codes_target']
         audio_codes_lens_target = batch_output['audio_codes_lens_target']
@@ -1423,8 +1522,19 @@ class MagpieTTSModel(ModelPT):
             'val_alignment_loss': alignment_loss,
             'val_local_transformer_loss': local_transformer_loss,
             'val_aligner_encoder_loss': aligner_encoder_loss,
+             # Include speaking rate loss in return
+            'val_speaking_rate_loss': speaking_rate_loss, 
         }
         self.validation_step_outputs.append(val_output)
+
+         # Log validation losses
+        self.log('val/loss', loss, prog_bar=True, sync_dist=True)
+        self.log('val/codebook_loss', codebook_loss, prog_bar=True, sync_dist=True)
+        self.log('val/alignment_loss', alignment_loss, prog_bar=True, sync_dist=True)
+        self.log('val/aligner_encoder_loss', aligner_encoder_loss, prog_bar=True, sync_dist=True)
+        # Log speaking rate loss
+        self.log('val/speaking_rate_loss', speaking_rate_loss, prog_bar=True, sync_dist=True)  
+
 
         return val_output
 
@@ -1554,7 +1664,9 @@ class MagpieTTSModel(ModelPT):
             start_prior_after_n_audio_steps=10,
             compute_all_heads_attn_maps=False,
             use_local_transformer_for_inference=False,
-            maskgit_n_steps=3
+            maskgit_n_steps=3,
+            # New parameter for speaking rate control
+            speaking_rate=None  
         ):
         with torch.no_grad():
             start_time = time.time()
@@ -1571,6 +1683,11 @@ class MagpieTTSModel(ModelPT):
 
             all_predictions = []
             end_indices = {}
+
+             # Speaking rate conditioning
+            if speaking_rate is None:
+                speaking_rate, speaking_rate_indices = self.get_speaking_rate(text_lens=context_tensors['text_lens'], durs=durs)
+            text_enc_sr_cond = self._condition_on_speaking_rate(context_tensors['text_encoder_out'], speaking_rate, text_mask)
 
             if use_cfg:
                 dummy_cond, dummy_cond_mask, dummy_additional_decoder_input, dummy_addition_dec_mask, _ = (
@@ -1660,14 +1777,24 @@ class MagpieTTSModel(ModelPT):
                     all_code_logits = (1 - cfg_scale) * uncond_logits + cfg_scale * cond_logits
                 else:
                     batch_size = audio_codes_embedded.size(0)
+                    # Original forward pass
+                    # all_code_logits, attn_probs, dec_out = self.forward(
+                    #     dec_input_embedded=_audio_codes_embedded,
+                    #     dec_input_mask=_audio_codes_mask,
+                    #     cond=context_tensors['cond'],
+                    #     cond_mask=context_tensors['cond_mask'],
+                    #     attn_prior=attn_prior,
+                    #     multi_encoder_mapping=context_tensors['multi_encoder_mapping']
+                    # )
                     all_code_logits, attn_probs, dec_out = self.forward(
-                        dec_input_embedded=_audio_codes_embedded,
-                        dec_input_mask=_audio_codes_mask,
-                        cond=context_tensors['cond'],
-                        cond_mask=context_tensors['cond_mask'],
-                        attn_prior=attn_prior,
-                        multi_encoder_mapping=context_tensors['multi_encoder_mapping']
-                    )
+                    dec_input_embedded=_audio_codes_embedded,
+                    dec_input_mask=_audio_codes_mask,
+                    cond=text_enc_sr_cond,  # Use conditioned text encoder output
+                    cond_mask=context_tensors['cond_mask'],
+                    attn_prior=attn_prior,
+                    multi_encoder_mapping=context_tensors['multi_encoder_mapping']
+                )
+
 
                 if return_cross_attn_probs or apply_attention_prior:
                     cross_attention_scores, all_heads_cross_attn_scores = self.get_cross_attention_scores(attn_probs) # B, text_timesteps
