@@ -1287,9 +1287,21 @@ class MagpieTTSModel(ModelPT):
                     attn_prior = self.replace_beta_binomial_prior_with_binarized(attn_prior, aligner_attn_hard)
        
         # Extract durations from alignment prior if available
+        # if 'align_prior_matrix' in batch and batch['align_prior_matrix'] is not None:
+        #     align_prior = batch['align_prior_matrix']  # Shape: (B, text_len, spec_len)
+        #     durs = align_prior.sum(dim=2)  # Sum over audio dimension -> (B, text_len)
         if 'align_prior_matrix' in batch and batch['align_prior_matrix'] is not None:
-            align_prior = batch['align_prior_matrix']  # Shape: (B, text_len, spec_len)
-            durs = align_prior.sum(dim=2)  # Sum over audio dimension -> (B, text_len)
+            align_prior = batch['align_prior_matrix']  # Shape: (B, text_len_from_prior, spec_len)
+            # Make sure we only use the valid text length portion
+            text_lens = context_tensors['text_lens']
+            batch_size = align_prior.shape[0]
+            # Create duration tensor with correct shape
+            max_text_len = text_lens.max().item()
+            durs = torch.zeros(batch_size, max_text_len, device=align_prior.device, dtype=torch.float)
+            # Extract durations only for valid text lengths
+            for i in range(batch_size):
+                valid_len = min(text_lens[i].item(), align_prior.shape[1])
+                durs[i, :valid_len] = align_prior[i, :valid_len, :].sum(dim=1)
         else:
             # Fallback: estimate durations based on audio/text length ratio
             text_lens = context_tensors['text_lens']
