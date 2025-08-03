@@ -24,6 +24,8 @@ from lightning.pytorch.loggers import TensorBoardLogger, WandbLogger
 from omegaconf import DictConfig, OmegaConf, open_dict
 from torch import nn
 from torch.utils.data import get_worker_info
+import torch.nn.functional as F
+from einops import rearrange
 
 import nemo.collections.asr as nemo_asr
 from nemo.collections.common.data.lhotse import get_lhotse_dataloader_from_config
@@ -1304,7 +1306,7 @@ class MagpieTTSModel(ModelPT):
                     avg_dur = audio_len.float() / text_lens[i].float()
                     durs[i, :text_lens[i]] = avg_dur
         text_mask = context_tensors['text_mask']
-        
+
         # Speaking rate conditioning
         speaking_rate, speaking_rate_indices = self.get_speaking_rate(text_lens=context_tensors['text_lens'], durs=durs)
         text_enc_sr_cond = self._condition_on_speaking_rate(context_tensors['text_encoder_out'], speaking_rate, text_mask)
