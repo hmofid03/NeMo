@@ -77,7 +77,18 @@ class SpeakingRateQuantizer(nn.Module):
         codes = indices.float() / self.max_bin
         codes = 2.0 * codes - 1.0
         return codes
+    
+class SpeakingRateLoss(nn.Module):
+    def __init__(self, label_smoothing=0.0):
+        super().__init__()  # Initialize the parent class (nn.Module)
+        # Create cross entropy loss with optional label smoothing
+        self.loss_fn = nn.CrossEntropyLoss(reduction='mean', label_smoothing=label_smoothing)
 
+    def forward(self, logits, target_index):
+        # Convert target indices to long type
+        loss = self.loss_fn(input=logits, target=target_index.long())
+        return loss
+    
 def worker_init_fn(worker_id):
     # For mp.set_start_method("spawn", force=True)
     # The dataset class should be picklable, so we initialize non-picklable objects here
@@ -321,6 +332,7 @@ class MagpieTTSModel(ModelPT):
         # Initialize speaking rate modules
         self.sr_predictor = SpeakingRatePredictor(cfg.encoder.d_model, cfg.num_speaking_rate_bins)
         self.sr_quantizer = SpeakingRateQuantizer(cfg.num_speaking_rate_bins, cfg.min_speaking_rate, cfg.max_speaking_rate)
+        self.speaking_rate_loss_fn = SpeakingRateLoss(label_smoothing=0.0)
 
         # Add conditioning layer and dropout for speaking rate
         self.sr_cond_layer = nn.Linear(1, cfg.encoder.d_model)
@@ -1351,7 +1363,8 @@ class MagpieTTSModel(ModelPT):
 
         # Calculate speaking rate loss
         speaking_rate_indices_pred, speaking_rate_logits = self.sr_predictor(context_tensors['text_encoder_out'])
-        speaking_rate_loss = F.cross_entropy(speaking_rate_logits, speaking_rate_indices)
+        #speaking_rate_loss = F.cross_entropy(speaking_rate_logits, speaking_rate_indices)
+        speaking_rate_loss = self.speaking_rate_loss_fn(speaking_rate_logits, speaking_rate_indices)
 
 
         # logits: (B, T', num_codebooks * num_tokens_per_codebook)
