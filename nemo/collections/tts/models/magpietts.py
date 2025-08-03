@@ -1195,8 +1195,8 @@ class MagpieTTSModel(ModelPT):
         audio_codes_lens_input = audio_codes_lens_target = audio_codes_lens - 1
         audio_codes_embedded_all = self.embed_audio_tokens(audio_codes) # (B, T, E) # Computing this to be use in the alignment encoder
         audio_codes_embedded = audio_codes_embedded_all[:, :-1, :] # (B, T', E) Input to the decoder
-
         audio_codes_mask = get_mask_from_lengths(audio_codes_lens_input)
+
         use_cfg = (
             (self.cfg_unconditional_prob > 0.0)
             and (mode == "train")
@@ -1284,24 +1284,35 @@ class MagpieTTSModel(ModelPT):
                 if (self.global_step > self.binarize_prior_after_step) and context_tensors['prior_used']:
                     attn_prior = self.replace_beta_binomial_prior_with_binarized(attn_prior, aligner_attn_hard)
        
+        # Extract durations from alignment prior if available
+        if 'align_prior_matrix' in batch and batch['align_prior_matrix'] is not None:
+            align_prior = batch['align_prior_matrix']  # Shape: (B, text_len, spec_len)
+            durs = align_prior.sum(dim=2)  # Sum over audio dimension -> (B, text_len)
+        else:
+            # Fallback: estimate durations based on audio/text length ratio
+            text_lens = context_tensors['text_lens']
+            batch_size = text_lens.shape[0]
+            max_text_len = text_lens.max().item()
+            durs = torch.ones(batch_size, max_text_len, device=text_lens.device, dtype=torch.float)
+            
+            for i in range(batch_size):
+                if text_lens[i] > 0:
+                    if 'audio_codes' in batch:
+                        audio_len = batch['audio_codes_lens'][i] - 2  # -2 for BOS/EOS
+                    else:
+                        audio_len = audio_codes_lens_input[i]
+                    avg_dur = audio_len.float() / text_lens[i].float()
+                    durs[i, :text_lens[i]] = avg_dur
+        text_mask = context_tensors['text_mask']
+        
         # Speaking rate conditioning
         speaking_rate, speaking_rate_indices = self.get_speaking_rate(text_lens=context_tensors['text_lens'], durs=durs)
         text_enc_sr_cond = self._condition_on_speaking_rate(context_tensors['text_encoder_out'], speaking_rate, text_mask)
 
-        # Original code of the forward pass with no speaking rate
-        # logits, attn_info, dec_out = self.forward(
-        #     dec_input_embedded=dec_input_embedded,
-        #     dec_input_mask=dec_input_mask,
-        #     cond=cond,
-        #     cond_mask=cond_mask,
-        #     attn_prior=attn_prior,
-        #     multi_encoder_mapping=context_tensors['multi_encoder_mapping'],
-        # )
-
         logits, attn_info, dec_out = self.forward(
             dec_input_embedded=dec_input_embedded,
             dec_input_mask=dec_input_mask,
-            cond=text_enc_sr_cond,
+            cond=text_enc_sr_cond,  
             cond_mask=cond_mask,
             attn_prior=attn_prior,
             multi_encoder_mapping=context_tensors['multi_encoder_mapping'],
