@@ -1293,10 +1293,10 @@ class MagpieTTSModel(ModelPT):
             text_lens = context_tensors['text_lens']
             # Get the actual max text length from current batch
             max_text_len = text_lens.max().item()
+            batch_size = align_prior.shape[0]
             durs = torch.zeros(batch_size, max_text_len, device=align_prior.device, dtype=torch.float)
             # Handle shape mismatches
             if align_prior.shape[1] != max_text_len:
-                batch_size = align_prior.shape[0]
                 # Create duration tensor with correct shape
                 durs = torch.zeros(batch_size, max_text_len, device=align_prior.device)
                 # Extract durations only for valid text lengths
