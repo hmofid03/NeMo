@@ -1362,8 +1362,8 @@ class MagpieTTSModel(ModelPT):
         # Calculate speaking rate loss
         speaking_rate_indices_pred, speaking_rate_logits = self.sr_predictor(context_tensors['text_encoder_out'])
         # Add this before calculating the loss
-        print(f"speaking_rate_logits shape: {speaking_rate_logits.shape}, type: {speaking_rate_logits.dtype}")
-        print(f"speaking_rate_indices shape: {speaking_rate_indices.shape}, type: {speaking_rate_indices.dtype}")
+        #print(f"speaking_rate_logits shape: {speaking_rate_logits.shape}, type: {speaking_rate_logits.dtype}")
+        #print(f"speaking_rate_indices shape: {speaking_rate_indices.shape}, type: {speaking_rate_indices.dtype}")
         # Apply attention pooling if we have a time dimension
         if len(speaking_rate_logits.shape) == 3:  # [B, T, C]
             # Create attention weights based on the sum of logits
