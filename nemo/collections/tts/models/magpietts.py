@@ -345,11 +345,24 @@ class MagpieTTSModel(ModelPT):
         return speaking_rate, speaking_rate_indices
 
     def _condition_on_speaking_rate(self, inputs, speaking_rate, mask):
-        sr_res = self.sr_cond_layer(speaking_rate.unsqueeze(1)).detach()
+        # speaking_rate shape: (B,) - one value per batch item
+        # inputs shape: (B, T, D) where T=328
+
+        # Create speaking rate embedding - shape (B, 1)
+        speaking_rate = speaking_rate.unsqueeze(1).detach()  # (B, 1)
+
+        # Pass through linear layer - output shape (B, hidden_dim)
+        sr_res = self.sr_cond_layer(speaking_rate)  # (B, hidden_dim)
+
+        # Add time dimension and apply dropout
+        sr_res = sr_res.unsqueeze(1)  # (B, 1, hidden_dim)
         sr_res = self.sr_dropout(sr_res)
-        out = inputs + sr_res
+
+        # Now sr_res has shape (B, 1, hidden_dim) and will broadcast correctly
+        out = inputs + sr_res  # Broadcasting: (B, T, hidden_dim) + (B, 1, hidden_dim)
         out = out * mask.unsqueeze(-1)
         return out
+
 
     def state_dict(self, destination=None, prefix='', keep_vars=False):
         """
