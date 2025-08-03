@@ -81,22 +81,10 @@ class SpeakingRateQuantizer(nn.Module):
 class SpeakingRateLoss(nn.Module):
     def __init__(self, label_smoothing=0.0):
         super().__init__()
-        self.label_smoothing = label_smoothing
-    
+        self.loss_fn = torch.nn.CrossEntropyLoss(reduction='mean', label_smoothing=label_smoothing)
+
     def forward(self, logits, target_index):
-        # Direct implementation of cross entropy to avoid shape issues
-        log_softmax = F.log_softmax(logits, dim=-1)
-        
-        # Get one-hot targets
-        target_one_hot = F.one_hot(target_index.long(), num_classes=logits.size(-1)).float()
-        
-        # Apply label smoothing if needed
-        if self.label_smoothing > 0:
-            smooth_factor = self.label_smoothing / (logits.size(-1) - 1)
-            target_one_hot = target_one_hot * (1 - self.label_smoothing) + smooth_factor * (1 - target_one_hot)
-        
-        # Calculate loss
-        loss = -(target_one_hot * log_softmax).sum(dim=-1).mean()
+        loss = self.loss_fn(input=logits, target=target_index.long())
         return loss
     
 def worker_init_fn(worker_id):
@@ -1373,10 +1361,18 @@ class MagpieTTSModel(ModelPT):
 
         # Calculate speaking rate loss
         speaking_rate_indices_pred, speaking_rate_logits = self.sr_predictor(context_tensors['text_encoder_out'])
-        #speaking_rate_loss = F.cross_entropy(speaking_rate_logits, speaking_rate_indices)
         # Add this before calculating the loss
         print(f"speaking_rate_logits shape: {speaking_rate_logits.shape}, type: {speaking_rate_logits.dtype}")
         print(f"speaking_rate_indices shape: {speaking_rate_indices.shape}, type: {speaking_rate_indices.dtype}")
+        # Apply attention pooling if we have a time dimension
+        if len(speaking_rate_logits.shape) == 3:  # [B, T, C]
+            # Create attention weights based on the sum of logits
+            attn_weights = torch.sum(speaking_rate_logits, dim=-1)  # [B, T]
+            attn_weights = F.softmax(attn_weights, dim=1).unsqueeze(-1)  # [B, T, 1]
+            # Apply attention weights to get weighted average
+            speaking_rate_logits = torch.sum(speaking_rate_logits * attn_weights, dim=1)  # [B, C]
+        # Now speaking_rate_logits has shape [B, C]
+        # Calculate speaking rate loss
         speaking_rate_loss = self.speaking_rate_loss_fn(speaking_rate_logits, speaking_rate_indices)
 
 
