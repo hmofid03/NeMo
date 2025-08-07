@@ -37,12 +37,10 @@ model:
 
 
   # Speaking rate parameters
-  num_speaking_rate_bins: 10
-  min_speaking_rate: -1.875
-  max_speaking_rate: -1.125
+  num_speaking_rate_bins: 21
+  min_speaking_rate: -2.25
+  max_speaking_rate: -1.0
   speaking_rate_dropout: 0.1
-  min_token_duration: 1
-  max_token_duration: 30
 
 
   # Alignment encoder parameters, to binarize the prior
