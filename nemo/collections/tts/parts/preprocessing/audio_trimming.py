@@ -254,6 +254,51 @@ class VadAudioTrimmer(AudioTrimmer):
         return trimmed_audio, start_sample, end_sample
 
 
+    def get_speech_boundaries(self, audio: np.array, sample_rate: int, audio_id: str = "") -> Tuple[int, int]:
+        """Get start and end samples of speech without padding"""
+        if sample_rate == self.vad_sample_rate:
+            vad_audio = audio
+        else:
+            # Resample audio to match sample rate of VAD model
+            vad_audio = librosa.resample(audio, orig_sr=sample_rate, target_sr=self.vad_sample_rate)
+
+        if self.volume_norm:
+            # Normalize volume so we have a fixed scale relative to the reference amplitude
+            vad_audio = normalize_volume(audio=vad_audio, volume_level=1.0)
+
+        speech_frames = self._detect_speech(audio=vad_audio)
+
+        start_frame, end_frame = get_start_and_end_of_speech_frames(
+            is_speech=speech_frames,
+            speech_frame_threshold=self.speech_frame_threshold,
+            audio_id=audio_id,
+        )
+        
+        if not start_frame and not end_frame:
+            return 0, 0
+
+        if start_frame == 0:
+            start_sample = 0
+        else:
+            start_sample = librosa.core.frames_to_samples(start_frame, hop_length=self.trim_hop_length)
+            start_sample += self.trim_shift
+
+        if end_frame == speech_frames.shape[0]:
+            end_sample = vad_audio.shape[0]
+        else:
+            end_sample = librosa.core.frames_to_samples(end_frame, hop_length=self.trim_hop_length)
+            end_sample += self.trim_shift
+
+        if sample_rate != self.vad_sample_rate:
+            # Convert sample indices back to input sample rate
+            start_sample, end_sample = self._scale_sample_indices(
+                start_sample=start_sample,
+                end_sample=end_sample,
+                sample_rate=sample_rate
+            )
+
+        return start_sample, end_sample
+
 def get_start_and_end_of_speech_frames(
     is_speech: np.array, speech_frame_threshold: int, audio_id: str = ""
 ) -> Tuple[int, int]:

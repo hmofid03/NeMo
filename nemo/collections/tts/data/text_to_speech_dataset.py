@@ -38,6 +38,7 @@ from nemo.collections.tts.parts.utils.tts_dataset_utils import (
 from nemo.core.classes import Dataset
 from nemo.utils import logging
 from nemo.utils.decorators import experimental
+from nemo.collections.tts.parts.preprocessing.audio_trimming import VadAudioTrimmer
 
 
 @dataclass
@@ -396,6 +397,20 @@ class MagpieTTSDataset(TextToSpeechDataset):
             max_duration=max_duration,
             volume_norm=volume_norm,
         )
+
+        # Initialize VAD trimmer
+        self.vad_trimmer = VadAudioTrimmer(
+            model_name="vad_multilingual_marblenet",
+            vad_sample_rate=16000,
+            vad_threshold=0.5,
+            device="cpu",
+            speech_frame_threshold=3,
+            trim_win_length=4096,
+            trim_hop_length=1024,
+            pad_seconds=0.1
+        )
+        self.CODEC_FPS = 21
+
         self.bos_id = bos_id # TODO @xueyang: this should be removed since no other places used it.
         self.eos_id = eos_id
         self.audio_bos_id = audio_bos_id
@@ -455,6 +470,33 @@ class MagpieTTSDataset(TextToSpeechDataset):
             if 'audio_filepath' in data.manifest_entry:
                 # If audio_filepath is available, then use the actual audio file path.
                 example['audio_filepath'] = data.manifest_entry['audio_filepath']
+
+            # Load WAV for VAD (we need the original audio for silence detection)
+            audio_array, _, _ = load_audio(
+                manifest_entry=data.manifest_entry,
+                audio_dir=data.audio_dir,
+                sample_rate=self.sample_rate,
+                volume_norm=self.volume_norm,
+            )
+            
+            # Get speech boundaries from VAD
+            start_sample, end_sample = self.vad_trimmer.get_speech_boundaries(
+                audio=audio_array,
+                sample_rate=self.sample_rate,
+                audio_id=str(index)
+            )
+            
+            # Convert to codec frames
+            start_time = start_sample / self.sample_rate
+            end_time = end_sample / self.sample_rate
+            total_duration = len(audio_array) / self.sample_rate
+            
+            example['leading_silence_frames'] = int(start_time * self.CODEC_FPS)
+            example['trailing_silence_frames'] = int((total_duration - end_time) * self.CODEC_FPS)
+
+             # debugging print statement for verification
+            print(f"File {data.manifest_entry['audio_filepath']}: leading silence = {example['leading_silence_frames']}, "
+            f"trailing silence = {example['trailing_silence_frames']}")
         else:
             # Only load audio if codes are not available
             audio_array, _, audio_filepath_rel = load_audio(
@@ -464,6 +506,22 @@ class MagpieTTSDataset(TextToSpeechDataset):
                 volume_norm=self.volume_norm,
             )
             audio = torch.tensor(audio_array, dtype=torch.float32)
+
+            # Get VAD boundaries
+            start_sample, end_sample = self.vad_trimmer.get_speech_boundaries(
+                audio=audio_array,
+                sample_rate=self.sample_rate,
+                audio_id=str(index)
+            )
+            
+            # Convert to codec frames
+            start_time = start_sample / self.sample_rate
+            end_time = end_sample / self.sample_rate
+            total_duration = len(audio_array) / self.sample_rate
+            
+            example['leading_silence_frames'] = int(start_time * self.CODEC_FPS)
+            example['trailing_silence_frames'] = int((total_duration - end_time) * self.CODEC_FPS)
+
             # Pad audio to be multiple of downsample factor
             audio = torch.nn.functional.pad(
                 audio,
@@ -643,6 +701,9 @@ class MagpieTTSDataset(TextToSpeechDataset):
         reward_list = []
         raw_text_list = []
         language_list = []
+        # adding leading and trailing silence lists
+        leading_silence_frames_list = []
+        trailing_silence_frames_list = []
         for example in batch:
             dataset_name_list.append(example["dataset_name"])
             audio_filepath_list.append(example["audio_filepath"])
@@ -651,6 +712,9 @@ class MagpieTTSDataset(TextToSpeechDataset):
 
             token_list.append(example["tokens"])
             token_len_list.append(example["text_len"])
+
+            leading_silence_frames_list.append(example['leading_silence_frames'])
+            trailing_silence_frames_list.append(example['trailing_silence_frames'])
 
             if 'audio' in example:
                 audio_list.append(example["audio"])
@@ -694,6 +758,9 @@ class MagpieTTSDataset(TextToSpeechDataset):
             "audio_filepaths": audio_filepath_list,
             "text": batch_tokens,
             "text_lens": batch_token_len,
+            # adding the leading and trailing silence keys 
+            "leading_silence_frames": torch.tensor(leading_silence_frames_list, dtype=torch.long),
+            "trailing_silence_frames": torch.tensor(trailing_silence_frames_list, dtype=torch.long),
         }
 
         if len(audio_list) > 0:

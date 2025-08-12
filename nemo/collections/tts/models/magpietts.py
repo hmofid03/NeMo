@@ -1212,10 +1212,19 @@ class MagpieTTSModel(ModelPT):
             audio_codes = batch['audio_codes']
             audio_codes_lens = batch['audio_codes_lens']
 
-        audio_lens = audio_codes_lens - 2  # -2 for BOS/EOS
+        #audio_lens = audio_codes_lens - 2  # -2 for BOS/EOS
+        # subtracting 2 for BOS/EOS AND subtracting leading and trailing silence frames in current audio codec
+        audio_lens = (audio_codes_lens - 2  - batch['leading_silence_frames'] - batch['trailing_silence_frames'])
         text_lens = batch['text_lens']
         speaking_rate, speaking_rate_indices = self.get_speaking_rate(text_lens, audio_lens)
-    
+
+        print("\nBatch speaking rate calculation:")
+        print(f"Original audio length: {audio_codes_lens}")
+        print(f"After removing silence and bos/eos: {audio_lens}")
+        print(f"Text length: {text_lens}")
+        print(f"Speaking rate: {speaking_rate}\n")
+
+        
         # Pass speaking_rate to prepare_context_tensors
         context_tensors = self.prepare_context_tensors(batch, speaking_rate=speaking_rate)
 
