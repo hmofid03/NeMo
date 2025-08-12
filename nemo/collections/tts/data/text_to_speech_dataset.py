@@ -398,17 +398,17 @@ class MagpieTTSDataset(TextToSpeechDataset):
             volume_norm=volume_norm,
         )
 
-        # Initialize VAD trimmer
-        self.vad_trimmer = VadAudioTrimmer(
-            model_name="vad_multilingual_marblenet",
-            vad_sample_rate=16000,
-            vad_threshold=0.5,
-            device="cpu",
-            speech_frame_threshold=3,
-            trim_win_length=4096,
-            trim_hop_length=1024,
-            pad_seconds=0.1
-        )
+        self._vad_trimmer = None 
+        self.vad_config = {
+            "model_name": "vad_multilingual_marblenet",
+            "vad_sample_rate": 16000,
+            "vad_threshold": 0.5,
+            "device": "cpu",
+            "speech_frame_threshold": 3,
+            "trim_win_length": 4096,
+            "trim_hop_length": 1024,
+            "pad_seconds": 0.1
+        }
         self.CODEC_FPS = 21
 
         self.bos_id = bos_id # TODO @xueyang: this should be removed since no other places used it.
@@ -433,6 +433,12 @@ class MagpieTTSDataset(TextToSpeechDataset):
         self.pad_context_text_to_max_duration = pad_context_text_to_max_duration
         self.context_duration_min = context_duration_min
         self.context_duration_max = context_duration_max
+    
+    @property
+    def vad_trimmer(self):
+        if self._vad_trimmer is None:
+            self._vad_trimmer = VadAudioTrimmer(**self.vad_config)
+        return self._vad_trimmer
 
     def get_num_audio_samples_to_slice(self, duration, sample_rate):
         num_codec_frames = int(duration * sample_rate / self.codec_model_samples_per_frame)
